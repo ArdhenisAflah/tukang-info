@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environment
+.venv/
+
+# Local secrets
+.env
+*.session
+*.session-journal
+targets.txt
+
+# Runtime artifacts
+logs/
+whatsapp-profile/
+
+# Editor
+.vscode/
+.idea/

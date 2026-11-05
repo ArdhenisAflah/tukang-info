@@ -1,0 +1,20 @@
+[project]
+name = "tukang-info"
+version = "0.1.0"
+description = "Listen for incoming Telegram DMs from configured usernames"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "python-dotenv>=1.2.4",
+    "selenium>=4.52.0",
+    "telethon>=1.45.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
