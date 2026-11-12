@@ -9,9 +9,11 @@ from pathlib import Path
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver import Keys
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -19,14 +21,25 @@ from .base import ForwardMessage, MessageForwarder
 
 WHATSAPP_URL = "https://web.whatsapp.com/"
 
+DESKTOP_CHROME_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+)
+DESKTOP_FIREFOX_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+)
+
 SEARCH_INPUT_LOCATORS = (
     (By.CSS_SELECTOR, "#side input[role='textbox']"),
     (By.CSS_SELECTOR, "#side input[data-tab='3']"),
     (By.CSS_SELECTOR, "#side input"),
+    (By.CSS_SELECTOR, "#side div[contenteditable='true']"),
+    (By.CSS_SELECTOR, "#side [role='textbox']"),
 )
 
 MESSAGE_BOX_LOCATORS = (
     (By.CSS_SELECTOR, "footer div[contenteditable='true'][role='textbox']"),
+    (By.CSS_SELECTOR, 'div[contenteditable="true"][data-testid="conversation-compose-box-input"]'),
     (By.CSS_SELECTOR, "div[contenteditable='true'][data-tab='10']"),
     (By.CSS_SELECTOR, "div[contenteditable='true'][aria-label='Type a message']"),
 )
@@ -35,6 +48,24 @@ QR_LOCATORS = (
     (By.CSS_SELECTOR, "canvas[aria-label*='Scan']"),
     (By.CSS_SELECTOR, "canvas[aria-label*='QR']"),
     (By.CSS_SELECTOR, "div[data-ref]"),
+)
+
+LOADING_LOCATORS = (
+    (By.CSS_SELECTOR, "[data-testid='wa-web-loading-screen']"),
+    (By.CSS_SELECTOR, "progress"),
+    (
+        By.XPATH,
+        "//*[contains(text(), 'Loading your chats') or contains(text(), 'Memuat chat Anda')]",
+    ),
+)
+
+UNSUPPORTED_BROWSER_MARKERS = (
+    "whatsapp dapat digunakan di google chrome",
+    "perbarui chrome",
+    "update chrome",
+    "update your browser",
+    "whatsapp works with google chrome",
+    "browser is not supported",
 )
 
 OUTGOING_MESSAGE_SELECTOR = "#main div.message-out"
@@ -58,15 +89,84 @@ def format_message(message: ForwardMessage) -> str:
     return f"{header}: {text}"
 
 
+def desktop_user_agent(fallback: str) -> str:
+    return os.getenv("WHATSAPP_USER_AGENT", "").strip() or fallback
+
+
+def build_chrome_options(
+    profile_dir: Path,
+    *,
+    headless: bool,
+    attach: str | None = None,
+) -> ChromeOptions:
+    options = ChromeOptions()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--window-size=1400,900")
+    # WhatsApp Web rejects the default "HeadlessChrome" user agent.
+    options.add_argument(f"--user-agent={desktop_user_agent(DESKTOP_CHROME_UA)}")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    if attach:
+        options.add_experimental_option("debuggerAddress", attach)
+        return options
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    options.add_argument(f"--user-data-dir={profile_dir}")
+
+    binary = os.getenv("WHATSAPP_CHROME_BINARY", "/usr/bin/chromium")
+    if Path(binary).exists():
+        options.binary_location = binary
+
+    if headless:
+        options.add_argument("--headless=new")
+
+    return options
+
+
+def build_firefox_options(profile_dir: Path, *, headless: bool) -> FirefoxOptions:
+    options = FirefoxOptions()
+    options.set_preference("dom.webnotifications.enabled", False)
+    options.set_preference("permissions.default.desktop-notification", 2)
+    options.set_preference("media.volume_scale", "0.0")
+    options.set_preference(
+        "general.useragent.override",
+        desktop_user_agent(DESKTOP_FIREFOX_UA),
+    )
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    options.add_argument("-profile")
+    options.add_argument(str(profile_dir))
+
+    binary = (
+        os.getenv("WHATSAPP_FIREFOX_BINARY")
+        or shutil.which("firefox")
+        or shutil.which("firefox-esr")
+    )
+    if binary and Path(binary).exists():
+        options.binary_location = binary
+
+    if headless:
+        options.add_argument("-headless")
+
+    return options
+
+
 class WhatsAppWebForwarder(MessageForwarder):
     def __init__(
         self,
         target: str,
         profile_dir: Path,
         *,
+        browser: str = "chrome",
         headless: bool = False,
         attach: str | None = None,
-        timeout: int = 30,
+        timeout: int = 45,
         dry_run: bool = False,
     ) -> None:
         if not target.strip():
@@ -74,6 +174,7 @@ class WhatsAppWebForwarder(MessageForwarder):
 
         self.target = target.strip()
         self.profile_dir = profile_dir
+        self.browser = browser.strip().lower()
         self.headless = headless
         self.attach = attach
         self.timeout = timeout
@@ -82,10 +183,17 @@ class WhatsAppWebForwarder(MessageForwarder):
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._owns_driver = attach is None
 
+        if self.browser not in {"chrome", "firefox"}:
+            raise ValueError(
+                f"Unsupported WHATSAPP_BROWSER {self.browser!r}; use 'chrome' or 'firefox'"
+            )
+        if self.attach and self.browser != "chrome":
+            raise ValueError("WHATSAPP_ATTACH is only supported with Chrome")
+
         self.driver = self._build_driver()
-        self._apply_viewport()
         self.wait = WebDriverWait(self.driver, self.timeout)
         try:
+            self._apply_viewport()
             self._open_whatsapp()
             self._select_chat()
         except (TimeoutException, WebDriverException, RuntimeError):
@@ -93,59 +201,32 @@ class WhatsAppWebForwarder(MessageForwarder):
             self.close()
             raise
 
-    def _build_driver(self) -> webdriver.Chrome:
-        options = Options()
+    def _build_driver(self) -> webdriver.Remote:
+        if self.browser == "firefox":
+            return self._build_firefox_driver()
+        return self._build_chrome_driver()
 
-        if self.attach:
-            options.add_experimental_option("debuggerAddress", self.attach)
-        else:
-            self.profile_dir.mkdir(parents=True, exist_ok=True)
-            options.add_argument(f"--user-data-dir={self.profile_dir}")
-            options.add_argument("--no-first-run")
-            options.add_argument("--no-default-browser-check")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-notifications")
-            options.add_argument("--window-size=1280,900")
-            options.add_argument(
-                "--user-agent="
-                + os.getenv(
-                    "WHATSAPP_USER_AGENT",
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-                )
-            )
-            options.add_experimental_option(
-                "excludeSwitches", ["enable-automation"]
-            )
-            options.add_experimental_option("useAutomationExtension", False)
-
-            binary = os.getenv("WHATSAPP_CHROME_BINARY", "/usr/bin/chromium")
-            if Path(binary).exists():
-                options.binary_location = binary
-
-            if self.headless:
-                options.add_argument("--headless=new")
-
+    def _build_chrome_driver(self) -> webdriver.Chrome:
+        options = build_chrome_options(
+            self.profile_dir, headless=self.headless, attach=self.attach
+        )
         driver_path = os.getenv("WHATSAPP_DRIVER_PATH") or shutil.which(
             "chromedriver"
         )
-        service = Service(driver_path) if driver_path else Service()
+        service = ChromeService(driver_path) if driver_path else ChromeService()
         return webdriver.Chrome(service=service, options=options)
 
+    def _build_firefox_driver(self) -> webdriver.Firefox:
+        options = build_firefox_options(self.profile_dir, headless=self.headless)
+        driver_path = os.getenv("WHATSAPP_GECKODRIVER_PATH") or shutil.which(
+            "geckodriver"
+        )
+        service = FirefoxService(driver_path) if driver_path else FirefoxService()
+        return webdriver.Firefox(service=service, options=options)
+
     def _apply_viewport(self) -> None:
-        # The window manager may tile the browser to a narrow size, which makes
-        # WhatsApp collapse the sidebar and hide the search input.
         try:
-            self.driver.execute_cdp_cmd(
-                "Emulation.setDeviceMetricsOverride",
-                {
-                    "width": 1400,
-                    "height": 900,
-                    "deviceScaleFactor": 1,
-                    "mobile": False,
-                },
-            )
+            self.driver.set_window_size(1400, 900)
         except WebDriverException:
             pass
 
@@ -169,8 +250,26 @@ class WhatsAppWebForwarder(MessageForwarder):
     def _qr_visible(self) -> bool:
         return bool(self._visible_elements(QR_LOCATORS))
 
+    def _is_loading_chats(self) -> bool:
+        return bool(self._visible_elements(LOADING_LOCATORS))
+
+    def _unsupported_browser(self) -> bool:
+        try:
+            body = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+        except WebDriverException:
+            return False
+        return any(marker in body for marker in UNSUPPORTED_BROWSER_MARKERS)
+
+    def _app_state(self) -> str | None:
+        if self._visible_elements(SEARCH_INPUT_LOCATORS):
+            return "search"
+        if self._qr_visible():
+            return "qr"
+        if self._unsupported_browser():
+            return "unsupported"
+        return "loading" if self._is_loading_chats() else None
+
     def _open_chats_tab(self) -> None:
-        # WhatsApp may restore the Calls tab after login; switch back to Chats.
         for label in ("Chat", "Chats", "Obrolan"):
             for button in self.driver.find_elements(
                 By.CSS_SELECTOR, f"button[aria-label='{label}']"
@@ -183,14 +282,13 @@ class WhatsAppWebForwarder(MessageForwarder):
                 except WebDriverException:
                     pass
 
-    def _wait_for_app_ready(self, timeout: int) -> str | None:
-        def ready(_driver) -> str | bool:
-            if self._visible_elements(SEARCH_INPUT_LOCATORS):
-                return "search"
-            if self._qr_visible():
-                return "qr"
+    def _wait_for_app(self, timeout: int) -> str | None:
+        def probe(_driver):
+            state = self._app_state()
+            if state in {"search", "qr", "unsupported"}:
+                return state
             self._open_chats_tab()
-            # A "What's new" overlay can hide the chat list after login.
+            self._dismiss_welcome_modal()
             try:
                 self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
             except WebDriverException:
@@ -198,44 +296,64 @@ class WhatsAppWebForwarder(MessageForwarder):
             return False
 
         try:
-            return WebDriverWait(self.driver, timeout).until(ready)
+            return WebDriverWait(self.driver, timeout).until(probe)
         except TimeoutException:
-            return None
+            return self._app_state()
 
     def _open_whatsapp(self) -> None:
         self.driver.get(WHATSAPP_URL)
-        state = self._wait_for_app_ready(self.timeout)
+        state = self._wait_for_app(self.timeout)
 
         if state == "search":
             self._dismiss_welcome_modal()
             return
 
-        if state != "qr":
-            self._save_evidence("login")
+        if state == "unsupported":
+            self._save_evidence("unsupported-browser")
             raise RuntimeError(
-                "Could not load WhatsApp Web. Check the browser window or page source."
+                "WhatsApp Web rejected this browser as unsupported. Selenium may "
+                "be sending a headless user agent; set WHATSAPP_USER_AGENT to a "
+                "normal desktop user agent or update the browser."
             )
 
-        if self.headless:
-            self._save_evidence("headless-qr")
-            raise RuntimeError(
-                "WhatsApp Web needs a QR login. Run once with "
-                "WHATSAPP_HEADLESS=false, scan the QR, then restart."
+        if state == "qr":
+            if self.headless:
+                self._save_evidence("headless-qr")
+                raise RuntimeError(
+                    "WhatsApp Web needs a QR login. Run once with "
+                    "WHATSAPP_HEADLESS=false, scan the QR, then restart."
+                )
+            browser_name = "Firefox" if self.browser == "firefox" else "Chromium"
+            print(
+                f"WhatsApp Web is not logged in. Scan the QR code in the "
+                f"{browser_name} window; waiting up to 3 minutes..."
             )
+            self._wait_any(
+                SEARCH_INPUT_LOCATORS,
+                EC.visibility_of_element_located,
+                timeout=180,
+            )
+            self._dismiss_welcome_modal()
+            return
 
-        print(
-            "WhatsApp Web is not logged in. Scan the QR code in the Chromium "
-            "window; waiting up to 3 minutes..."
+        # Give slow chat sync a quiet grace period before giving up.
+        if self._is_loading_chats():
+            print("WhatsApp Web is still syncing chats; waiting up to 2 more minutes...")
+            try:
+                WebDriverWait(self.driver, 120).until(
+                    lambda _driver: bool(self._visible_elements(SEARCH_INPUT_LOCATORS))
+                )
+                self._dismiss_welcome_modal()
+                return
+            except TimeoutException:
+                pass
+
+        self._save_evidence("login")
+        raise RuntimeError(
+            "Could not load WhatsApp Web. Check the browser window or page source."
         )
-        self._wait_any(
-            SEARCH_INPUT_LOCATORS,
-            EC.visibility_of_element_located,
-            timeout=180,
-        )
-        self._dismiss_welcome_modal()
 
     def _dismiss_welcome_modal(self) -> None:
-        # WhatsApp Web shows a "What's new" modal after a fresh login.
         for label in ("Lanjut", "Continue", "Tutup", "Close"):
             elements = self.driver.find_elements(
                 By.XPATH, f"//*[normalize-space(text())='{label}']"
@@ -255,18 +373,22 @@ class WhatsAppWebForwarder(MessageForwarder):
         )
 
     def _find_unique_visible(self, locator) -> object:
-        self.wait.until(EC.presence_of_element_located(locator))
-        matches = [
-            element
-            for element in self.driver.find_elements(*locator)
-            if element.is_displayed()
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"Expected exactly one WhatsApp chat matching {self.target!r}, "
-                f"found {len(matches)}"
-            )
-        return matches[0]
+        def probe(_driver):
+            matches = [
+                element
+                for element in self.driver.find_elements(*locator)
+                if element.is_displayed()
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"Expected exactly one WhatsApp chat matching {self.target!r}, "
+                    f"found {len(matches)}"
+                )
+            return False
+
+        return self.wait.until(probe)
 
     def _select_chat(self) -> None:
         search = self._wait_any(SEARCH_INPUT_LOCATORS, EC.element_to_be_clickable)
@@ -307,20 +429,21 @@ class WhatsAppWebForwarder(MessageForwarder):
 
         self.wait.until(sent)
 
+    def _clear_message_box(self) -> None:
+        box = self._wait_any(MESSAGE_BOX_LOCATORS, EC.element_to_be_clickable)
+        box.click()
+        box.send_keys(Keys.CONTROL, "a")
+        box.send_keys(Keys.BACKSPACE)
+        self.wait.until(lambda _driver: not self._message_box_text())
+
     def _dry_run_type(self, text: str) -> None:
-        self._select_chat()
         box = self._wait_any(MESSAGE_BOX_LOCATORS, EC.element_to_be_clickable)
         box.click()
         box.send_keys(text)
         self.wait.until(lambda _driver: text[:25] in self._message_box_text())
         print(f"[WhatsApp dry-run] typed: {self._message_box_text()}")
 
-        # Clear the draft so a later Enter cannot send it by accident.
-        box = self._wait_any(MESSAGE_BOX_LOCATORS, EC.element_to_be_clickable)
-        box.click()
-        box.send_keys(Keys.CONTROL, "a")
-        box.send_keys(Keys.BACKSPACE)
-        self.wait.until(lambda _driver: not self._message_box_text())
+        self._clear_message_box()
         print("[WhatsApp dry-run] input cleared; nothing sent.")
 
     def send(self, message: ForwardMessage) -> None:
@@ -328,12 +451,13 @@ class WhatsAppWebForwarder(MessageForwarder):
         if not text:
             return
 
-        if self.dry_run:
-            self._dry_run_type(text)
-            return
-
         try:
             self._select_chat()
+
+            if self.dry_run:
+                self._dry_run_type(text)
+                return
+
             box = self._wait_any(MESSAGE_BOX_LOCATORS, EC.element_to_be_clickable)
             before = self._outgoing_count()
             box.click()
@@ -348,9 +472,7 @@ class WhatsAppWebForwarder(MessageForwarder):
         safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "-", label)
         stem = f"{datetime.now():%Y%m%d-%H%M%S}-{safe_label}"
         try:
-            self.driver.save_screenshot(
-                str(self.evidence_dir / f"{stem}.png")
-            )
+            self.driver.save_screenshot(str(self.evidence_dir / f"{stem}.png"))
         except WebDriverException:
             pass
         try:

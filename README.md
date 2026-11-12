@@ -12,6 +12,7 @@ paid WhatsApp Business API is required.
 - Support Telegram usernames, `@username`, and numeric user IDs
 - Ignore messages that you send yourself
 - Forward to a WhatsApp contact or group by chat name
+- Chrome/Chromium or Firefox, including headless mode
 - Dry-run mode that types into WhatsApp but never presses Enter
 - Persistent Telegram and WhatsApp sessions
 - Screenshot and page-source evidence when WhatsApp automation fails
@@ -20,7 +21,7 @@ paid WhatsApp Business API is required.
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
-- Chromium and matching chromedriver
+- Chromium or Firefox (Selenium Manager downloads the matching driver)
 - A Telegram account
 - A WhatsApp account with WhatsApp Web access
 
@@ -116,6 +117,28 @@ After the QR login, unattended runs can use:
 WHATSAPP_HEADLESS=true
 ```
 
+Headless mode uses the same persistent profile, but Selenium reports a
+`HeadlessChrome/…` user agent by default and WhatsApp Web then refuses to load
+the chat list. The forwarder always sends a normal desktop user agent and a
+1400x900 viewport, so `WHATSAPP_HEADLESS=true` works without extra flags.
+
+### Firefox
+
+Use Firefox instead of Chromium:
+
+```env
+WHATSAPP_BROWSER=firefox
+```
+
+The Firefox session is stored separately at:
+
+```text
+~/.local/share/tukang-info/whatsapp-firefox
+```
+
+Geckodriver is resolved from `WHATSAPP_GECKODRIVER_PATH`, then `PATH`, then
+Selenium Manager. `WHATSAPP_ATTACH` is Chrome-only.
+
 Verify login and the target chat without sending anything:
 
 ```bash
@@ -180,7 +203,7 @@ WHATSAPP_ATTACH=127.0.0.1:9222
 main.py                    Telegram listener + forwarding loop
 check_whatsapp.py          Login/target verification without sending
 forwarders/base.py         ForwardMessage + MessageForwarder ABC
-forwarders/whatsapp.py     WhatsApp Web Selenium implementation
+forwarders/whatsapp.py     WhatsApp Web Selenium implementation (Chrome + Firefox)
 forwarders/__init__.py     Environment-based forwarder factory
 ```
 
@@ -205,9 +228,11 @@ Never commit `.env`, `targets.txt`, `*.session`, or the WhatsApp profile.
 | --- | --- |
 | `PhoneNumberInvalidError` | Use `+<country><number>`, without the leading `0` |
 | WhatsApp asks for QR again | Use `WHATSAPP_HEADLESS=false` and scan it |
+| Headless shows "WhatsApp dapat digunakan di Google Chrome" | Update to the latest code (desktop UA is set automatically) or set `WHATSAPP_USER_AGENT` |
 | Target chat is not found | Copy the exact chat/group name from WhatsApp Web |
 | Selectors stopped working | Inspect `logs/whatsapp-failed/*.html` and update `forwarders/whatsapp.py` |
 | Chromium/session error | Close other Selenium/WhatsApp sessions using the same profile |
+| Firefox does not start | Install Firefox/geckodriver or set `WHATSAPP_FIREFOX_BINARY` / `WHATSAPP_GECKODRIVER_PATH` |
 
 ## Development
 

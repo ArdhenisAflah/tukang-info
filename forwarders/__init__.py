@@ -21,11 +21,17 @@ def build_forwarder_from_env() -> MessageForwarder | None:
 
     from .whatsapp import WhatsAppWebForwarder
 
+    browser = os.getenv("WHATSAPP_BROWSER", "chrome").strip().lower()
+    default_profile = (
+        "~/.local/share/tukang-info/whatsapp-firefox"
+        if browser == "firefox"
+        else "~/.local/share/tukang-info/whatsapp-profile"
+    )
     profile_dir = Path(
         os.path.expanduser(
             os.getenv(
                 "WHATSAPP_PROFILE_DIR",
-                "~/.local/share/tukang-info/whatsapp-profile",
+                default_profile,
             )
         )
     )
@@ -35,6 +41,7 @@ def build_forwarder_from_env() -> MessageForwarder | None:
     return WhatsAppWebForwarder(
         target=target,
         profile_dir=profile_dir,
+        browser=browser,
         headless=_env_bool("WHATSAPP_HEADLESS"),
         attach=attach,
         timeout=timeout,
