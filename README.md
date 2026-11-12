@@ -1,5 +1,8 @@
 # tukang-info
 
+> This branch uses the debloated Chrome-only `SimpleWhatsAppForwarder`.
+> Firefox support lives on the `firefox-support` branch and on `main`.
+
 Forward incoming Telegram direct messages to a WhatsApp chat.
 
 The Telegram side uses the **user API** through Telethon, so it can read DMs sent

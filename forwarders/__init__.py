@@ -19,7 +19,7 @@ def build_forwarder_from_env() -> MessageForwarder | None:
     if not target:
         raise SystemExit("WHATSAPP_TARGET is required when WHATSAPP_ENABLED=true")
 
-    from .whatsapp import WhatsAppWebForwarder
+    from .whatsapp_simple import SimpleWhatsAppForwarder
 
     browser = os.getenv("WHATSAPP_BROWSER", "chrome").strip().lower()
     default_profile = (
@@ -38,7 +38,7 @@ def build_forwarder_from_env() -> MessageForwarder | None:
     attach = os.getenv("WHATSAPP_ATTACH") or None
     timeout = int(os.getenv("WHATSAPP_TIMEOUT", "45"))
 
-    return WhatsAppWebForwarder(
+    return SimpleWhatsAppForwarder(
         target=target,
         profile_dir=profile_dir,
         browser=browser,
